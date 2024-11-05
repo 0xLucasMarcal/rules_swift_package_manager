@@ -131,17 +131,16 @@ def _get_hdr_paths_from_modulemap(repository_ctx, modulemap_path, module_name):
     if len(module_decls) == 0:
         fail("No module declarations were found in %s." % (modulemap_path))
 
-    # Look for a module declaration that matches the module name. Only select
-    # headers from that module if it is found. Otherwise, we collect all of the
-    # headers in all of the module declarations at the top-level.
-    module_decl = lists.find(module_decls, lambda m: m.module_id == module_name)
-    if module_decl != None:
-        module_decls = [module_decl]
-
     modulemap_dirname = paths.dirname(modulemap_path)
     hdrs = []
     for module_decl in module_decls:
         for cdecl in module_decl.members:
+            if cdecl.decl_type == dts.umbrella_header:
+                # If the module has an umbrella header, then it is the only public header.
+                # All other headers are private.
+                umbrella_hdr = cdecl.path
+                normalized_umbrella_hdr = paths.normalize(paths.join(modulemap_dirname, umbrella_hdr))
+                hdrs.append(normalized_umbrella_hdr)
             if cdecl.decl_type == dts.single_header and not cdecl.private and not cdecl.textual:
                 # Resolve the path relative to the modulemap
                 hdr_path = paths.join(modulemap_dirname, cdecl.path)
@@ -282,8 +281,11 @@ def _collect_files(
             for hdr in mm_hdrs
         ])
 
-        mm_hdrs_set = sets.make(mm_hdrs)
-        hdrs_set = sets.union(hdrs_set, mm_hdrs_set)
+        if len(mm_hdrs) > 0:
+            # If we have found public headers in the modulemap, then we should set them as the public headers and set all others as private.
+            srcs_set = sets.union(srcs_set, hdrs_set)
+            hdrs_set = sets.make(mm_hdrs)
+
 
     # If we have not found any public header files for a library module, then
     # promote any headers that are listed in the srcs.
