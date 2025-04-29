@@ -29,7 +29,7 @@ def _new_for_target(repository_ctx, pkg_ctx, target, artifact_infos = []):
             lambda ai: ai.artifact_type == artifact_types.xcframework,
         )
         if xcf_artifact_info != None:
-            return _xcframework_import_build_file(target, xcf_artifact_info)
+            return _xcframework_import_build_file(pkg_ctx, target, xcf_artifact_info)
 
     # GH046: Support plugins.
     return None
@@ -44,7 +44,7 @@ def _swift_target_build_file(repository_ctx, pkg_ctx, target):
     attrs = {
         "module_name": target.c99name,
         "srcs": pkginfo_targets.srcs(target),
-        "visibility": ["//:__subpackages__"],
+        "visibility": _target_visibility(pkg_ctx.pkg_info.expose_build_targets),
     }
 
     def _update_attr_list(name, value):
@@ -108,6 +108,9 @@ def _swift_target_build_file(repository_ctx, pkg_ctx, target):
         # SPM directive instructing the code to build as if a Swift package.
         # https://github.com/apple/swift-package-manager/blob/main/Documentation/Usage.md#packaging-legacy-code
         "-DSWIFT_PACKAGE",
+        # SPM directive instructing the code to build as if a Swift package for any clang modules.
+        "-Xcc",
+        "-DSWIFT_PACKAGE",
     ]
 
     linkopts = []
@@ -125,9 +128,11 @@ def _swift_target_build_file(repository_ctx, pkg_ctx, target):
 
     # Check if any of the sources indicate that the module will be used by
     # Objective-C code. If so, generate the bridge header file.
+    features = []
     if target.swift_src_info.has_objc_directive and is_library_target:
         attrs["generates_header"] = True
-        attrs["features"] = ["swift.propagate_generated_module_map"]
+        feature = bzl_selects.new(value = "swift.propagate_generated_module_map")
+        features.append(feature)
 
     if target.swift_settings != None:
         if len(target.swift_settings.defines) > 0:
@@ -143,11 +148,32 @@ def _swift_target_build_file(repository_ctx, pkg_ctx, target):
                 bzl_selects.new_from_build_setting(bs)
                 for bs in target.swift_settings.unsafe_flags
             ]))
-        if len(target.swift_settings.experimental_features) > 0:
-            for bs in target.swift_settings.experimental_features:
-                copts.append("-enable-experimental-feature")
-                copts.extend(lists.flatten(bzl_selects.new_from_build_setting(bs)))
-
+        for bs in target.swift_settings.language_modes:
+            for language_mode in lists.flatten(bzl_selects.new_from_build_setting(bs)):
+                new_language_mode = bzl_selects.new(
+                    value = "swift.enable_v" + language_mode.value,
+                    kind = language_mode.kind,
+                    condition = language_mode.condition,
+                )
+                features.append(new_language_mode)
+        for bs in target.swift_settings.experimental_features:
+            for experimental_feature in lists.flatten(bzl_selects.new_from_build_setting(bs)):
+                new_experimental_feature = bzl_selects.new(
+                    value = "swift.experimental." + experimental_feature.value,
+                    kind = experimental_feature.kind,
+                    condition = experimental_feature.condition,
+                )
+                features.append(new_experimental_feature)
+        for bs in target.swift_settings.upcoming_features:
+            for upcoming_feature in lists.flatten(bzl_selects.new_from_build_setting(bs)):
+                new_upcoming_feature = bzl_selects.new(
+                    value = "swift.upcoming." + upcoming_feature.value,
+                    kind = upcoming_feature.kind,
+                    condition = upcoming_feature.condition,
+                )
+                features.append(new_upcoming_feature)
+    if len(features) > 0:
+        attrs["features"] = bzl_selects.to_starlark(features, mutually_inclusive = True)
     if len(copts) > 0:
         attrs["copts"] = bzl_selects.to_starlark(copts, mutually_inclusive = True)
 
@@ -348,7 +374,7 @@ def _clang_target_build_file(repository_ctx, pkg_ctx, target):
         "alwayslink": True,
         "copts": copts,
         "srcs": srcs,
-        "visibility": ["//:__subpackages__"],
+        "visibility": _target_visibility(pkg_ctx.pkg_info.expose_build_targets),
     }
     if clang_src_info.hdrs:
         attrs["hdrs"] = clang_src_info.hdrs
@@ -408,7 +434,7 @@ def _clang_target_build_file(repository_ctx, pkg_ctx, target):
                     "deps": [],
                     "hdrs": clang_src_info.hdrs,
                     "module_name": target.c99name,
-                    "visibility": ["//:__subpackages__"],
+                    "visibility": _target_visibility(pkg_ctx.pkg_info.expose_build_targets),
                 },
             ),
         )
@@ -522,7 +548,8 @@ def _clang_target_build_file(repository_ctx, pkg_ctx, target):
                     name = child_name,
                     attrs = attrs,
                     rule_kind = rule_kind,
-                    srcs = clang_src_info.organized_srcs.cxx_srcs +
+                    srcs = clang_src_info.organized_srcs.assembly_srcs +
+                           clang_src_info.organized_srcs.cxx_srcs +
                            clang_src_info.organized_srcs.objcxx_srcs +
                            clang_src_info.organized_srcs.other_srcs +
                            res_objcxx_srcs,
@@ -582,7 +609,7 @@ def _clang_target_build_file(repository_ctx, pkg_ctx, target):
             ":{}".format(dname)
             for dname in child_dep_names
         ],
-        "visibility": ["//:__subpackages__"],
+        "visibility": _target_visibility(pkg_ctx.pkg_info.expose_build_targets),
     }
     decls.append(
         build_decls.new(
@@ -704,7 +731,7 @@ def _system_library_build_file(target):
 
 # MARK: - Apple xcframework Targets
 
-def _xcframework_import_build_file(target, artifact_info):
+def _xcframework_import_build_file(pkg_ctx, target, artifact_info):
     attrs = {}
     if artifact_info.link_type == link_types.static:
         load_stmts = [apple_static_xcframework_import_load_stmt]
@@ -736,7 +763,7 @@ expected: {expected}\
             kind = kind,
             name = pkginfo_targets.bazel_label_name(target),
             attrs = attrs | {
-                "visibility": ["//:__subpackages__"],
+                "visibility": _target_visibility(pkg_ctx.pkg_info.expose_build_targets),
                 "xcframework_imports": glob,
             },
         ),
@@ -748,7 +775,7 @@ expected: {expected}\
 
 # MARK: - Apple Resource Group
 
-def _apple_resource_bundle(target, package_name, default_localization):
+def _apple_resource_bundle(target, package_name, default_localization, expose_build_targets):
     bzl_target_name = pkginfo_targets.bazel_label_name(target)
     bundle_label_name = pkginfo_targets.resource_bundle_label_name(bzl_target_name)
     bundle_name = pkginfo_targets.resource_bundle_name(package_name, target.c99name)
@@ -782,7 +809,7 @@ def _apple_resource_bundle(target, package_name, default_localization):
                 # Based upon the code in SPM, it looks like they only support unstructured resources.
                 # https://github.com/apple/swift-package-manager/blob/main/Sources/PackageModel/Resource.swift#L25-L33
                 "resources": resources,
-                "visibility": ["//:__subpackages__"],
+                "visibility": _target_visibility(expose_build_targets),
             },
         ),
     ]
@@ -797,6 +824,7 @@ def _apple_resource_bundle_for_swift(pkg_ctx, target):
         target,
         pkg_ctx.pkg_info.name,
         pkg_ctx.pkg_info.default_localization,
+        pkg_ctx.pkg_info.expose_build_targets,
     )
 
     # Apparently, SPM provides a `Bundle.module` accessor. So, we do too.
@@ -829,6 +857,7 @@ def _apple_resource_bundle_for_clang(pkg_ctx, target):
         target,
         pkg_ctx.pkg_info.name,
         pkg_ctx.pkg_info.default_localization,
+        pkg_ctx.pkg_info.expose_build_targets,
     )
     all_build_files = [apple_res_bundle_info.build_file]
     objc_accessor_hdr_label_name = None
@@ -1050,6 +1079,11 @@ def _new_for_license(pkg_info, license):
         package_attrs = {"default_package_metadata": default_package_metadata},
         decls = decls,
     )
+
+# MARK: - Build targets encapsulation
+
+def _target_visibility(expose_build_targets):
+    return ["//visibility:public"] if expose_build_targets else ["//:__subpackages__"]
 
 # MARK: - Constants and API Definition
 

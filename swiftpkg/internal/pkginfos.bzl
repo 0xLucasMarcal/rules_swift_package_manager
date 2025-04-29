@@ -27,7 +27,9 @@ def _get_dump_manifest(
         repository_ctx,
         env = {},
         working_directory = "",
-        debug_path = None):
+        debug_path = None,
+        registries_directory = None,
+        replace_scm_with_registry = False):
     """Returns a dict representing the package dump for an SPM package.
 
     Args:
@@ -37,6 +39,10 @@ def _get_dump_manifest(
         working_directory: A `string` specifying the directory for the SPM package.
         debug_path: A `string` specifying the directory path where to  write the
             JSON file.
+        registries_directory: Optional. The directory containing the
+            configuration file for setting a Swift Package Registry.
+        replace_scm_with_registry: Optional. A `bool` specifying whether to
+            replace SCM references with registry references.
 
     Returns:
         A `dict` representing an SPM package dump.
@@ -46,9 +52,17 @@ def _get_dump_manifest(
         debug_path = str(repository_ctx.path("."))
     debug_json_path = paths.join(debug_path, "dump.json")
 
+    args = ["swift", "package"]
+
+    if registries_directory:
+        args.extend(["--config-path", registries_directory])
+    if replace_scm_with_registry:
+        args.append("--replace-scm-with-registry")
+    args.append("dump-package")
+
     return repository_utils.parsed_json_from_spm_command(
         repository_ctx,
-        ["swift", "package", "dump-package"],
+        args,
         env = env,
         working_directory = working_directory,
         debug_json_path = debug_json_path,
@@ -58,7 +72,9 @@ def _get_desc_manifest(
         repository_ctx,
         env = {},
         working_directory = "",
-        debug_path = None):
+        debug_path = None,
+        registries_directory = None,
+        replace_scm_with_registry = False):
     """Returns a dict representing the package description for an SPM package.
 
     Args:
@@ -68,6 +84,10 @@ def _get_desc_manifest(
         working_directory: A `string` specifying the directory for the SPM package.
         debug_path: A `string` specifying the directory path where to  write the
             JSON file.
+        registries_directory: Optional. The directory containing the
+            configuration file for setting a Swift Package Registry.
+        replace_scm_with_registry: Optional. A `bool` specifying whether to
+            replace SCM references with registry references.
 
     Returns:
         A `dict` representing an SPM package description.
@@ -76,9 +96,19 @@ def _get_desc_manifest(
     if debug_path == None:
         debug_path = str(repository_ctx.path("."))
     debug_json_path = paths.join(debug_path, "desc.json")
+
+    args = ["swift", "package"]
+
+    if registries_directory:
+        args.extend(["--config-path", registries_directory])
+    if replace_scm_with_registry:
+        args.append("--replace-scm-with-registry")
+
+    args.extend(["describe", "--type", "json"])
+
     return repository_utils.parsed_json_from_spm_command(
         repository_ctx,
-        ["swift", "package", "describe", "--type", "json"],
+        args,
         env = env,
         working_directory = working_directory,
         debug_json_path = debug_json_path,
@@ -90,7 +120,9 @@ def _get(
         env = {},
         debug_path = None,
         resolved_pkg_map = None,
-        collect_src_info = True):
+        collect_src_info = True,
+        registries_directory = None,
+        replace_scm_with_registry = False):
     """Retrieves the package information for the Swift package defined at the \
     specified directory.
 
@@ -105,6 +137,10 @@ def _get(
             `Package.resolved` JSON.
         collect_src_info: Optional. A `bool` specifying whether source
             information should be collected for the package.
+        registries_directory: Optional. The directory containing the
+            configuration file for setting a Swift Package Registry.
+        replace_scm_with_registry: Optional. A `bool` specifying whether to
+            replace SCM references with registry references.
 
     Returns:
         A `struct` representing the package information as returned by
@@ -119,12 +155,16 @@ def _get(
         env = env,
         working_directory = directory,
         debug_path = debug_path,
+        registries_directory = registries_directory,
+        replace_scm_with_registry = replace_scm_with_registry,
     )
     desc_manifest = _get_desc_manifest(
         repository_ctx,
         env = env,
         working_directory = directory,
         debug_path = debug_path,
+        registries_directory = registries_directory,
+        replace_scm_with_registry = replace_scm_with_registry,
     )
     pkg_info = _new_from_parsed_json(
         repository_ctx = repository_ctx,
@@ -151,15 +191,34 @@ def _new_dependency_from_desc_json_map(dep_names_by_id, dep_map, resolved_dep_ma
 
     source_control = None
     file_system = None
+    registry = None
+
     if type == "sourceControl":
-        pin = None
+        # If the dependency is in the resolved map use that pin,
+        # otherwise, create a new pin with no state. This may be used
+        # by downstream logic to access things like the url of a
+        # package dependency that has not yet been resolved.
         if resolved_dep_map:
             pin = _new_pin_from_resolved_dep_map(resolved_dep_map)
+        else:
+            pin = _new_pin(
+                identity = identity,
+                kind = type,
+                location = dep_map["url"],
+                state = None,
+            )
         source_control = _new_source_control(
             pin = pin,
         )
     elif type == "fileSystem":
         file_system = _new_file_system(path = dep_map["path"])
+    elif type == "registry":
+        pin = None
+        if resolved_dep_map:
+            pin = _new_pin_from_resolved_dep_map(resolved_dep_map)
+        registry = _new_registry(
+            pin = pin,
+        )
     else:
         fail("Unrecognized dependency type {type} for {identity}.".format(
             type = type,
@@ -171,6 +230,7 @@ def _new_dependency_from_desc_json_map(dep_names_by_id, dep_map, resolved_dep_ma
         name = name,
         source_control = source_control,
         file_system = file_system,
+        registry = registry,
     )
 
 def _new_pin_from_resolved_dep_map(resolved_dep_map):
@@ -180,7 +240,7 @@ def _new_pin_from_resolved_dep_map(resolved_dep_map):
         kind = resolved_dep_map["kind"],
         location = resolved_dep_map["location"],
         state = _new_pin_state(
-            revision = state_map["revision"],
+            revision = state_map.get("revision"),
             version = state_map.get("version"),
         ),
     )
@@ -309,15 +369,12 @@ def _new_target_from_json_maps(
     for directory in resource_directories:
         sets.remove(resources_set, directory)
 
-        resource_files = [
-            p
-            for p in repository_files.list_files_under(
-                repository_ctx,
-                directory.path,
-                exclude_paths = exclude_paths,
-            )
-            if not repository_files.is_directory(repository_ctx, p)
-        ]
+        resource_files = repository_files.list_files_under(
+            repository_ctx,
+            directory.path,
+            exclude_paths = exclude_paths,
+            exclude_directories = True,
+        )
 
         for p in resource_files:
             res = _new_resource_from_discovered_resource(p)
@@ -510,7 +567,9 @@ def _new_dependency_identity_to_name_map(dump_deps):
     result = {}
     for dep in dump_deps:
         identity_provider_list = (
-            dep.get("sourceControl") or dep.get("fileSystem")
+            dep.get("sourceControl") or
+            dep.get("fileSystem") or
+            dep.get("registry")
         )
         if not identity_provider_list:
             continue
@@ -611,6 +670,7 @@ def _new_from_parsed_json(
 
     url = None
     version = None
+    expose_build_targets = False
     if hasattr(repository_ctx, "attr"):
         # We only want to try to collect url and version when called from
         # `swift_package`
@@ -619,6 +679,11 @@ def _new_from_parsed_json(
             repository_ctx.attr,
             "version",
             getattr(repository_ctx.attr, "commit", None),
+        )
+        expose_build_targets = getattr(
+            repository_ctx.attr,
+            "publicly_expose_all_targets",
+            False,
         )
 
     return _new(
@@ -635,6 +700,7 @@ def _new_from_parsed_json(
         targets = targets,
         url = url,
         version = version,
+        expose_build_targets = expose_build_targets,
         c_language_standard = dump_manifest.get("cLanguageStandard"),
         cxx_language_standard = dump_manifest.get("cxxLanguageStandard"),
     )
@@ -652,6 +718,7 @@ def _new(
         targets = [],
         url = None,
         version = None,
+        expose_build_targets = False,
         c_language_standard = None,
         cxx_language_standard = None):
     """Returns a `struct` representing information about a Swift package.
@@ -672,6 +739,8 @@ def _new(
             `pkginfos.new_target()`.
         url: Optional. The url of the package (`string`).
         version: Optional. The semantic version of the package (`string`).
+        expose_build_targets: Optional. Defaults to False. A boolean that specifies whether to expose
+            the package's internal build targets.
         c_language_standard: Optional. The c language standard (e.g. `c99`,
             `gnu99`, `c11`).
         cxx_language_standard: Optional. The c++ language standard (e.g.
@@ -691,6 +760,7 @@ def _new(
         targets = targets,
         url = url,
         version = version,
+        expose_build_targets = expose_build_targets,
         c_language_standard = c_language_standard,
         cxx_language_standard = cxx_language_standard,
     )
@@ -714,7 +784,12 @@ def _new_platform(name, version):
 
 # MARK: - External Dependency
 
-def _new_dependency(identity, name, source_control = None, file_system = None):
+def _new_dependency(
+        identity,
+        name,
+        source_control = None,
+        file_system = None,
+        registry = None):
     """Creates a `struct` representing an external dependency for a Swift \
     package.
 
@@ -727,6 +802,9 @@ def _new_dependency(identity, name, source_control = None, file_system = None):
         file_system: Optional. A `struct` as returned by
             `pkginfos.new_file_system()`. If present, it identifies the
             dependency as being loaded from a local file system.
+        registry: Optional. A `struct` as returned by
+            `pkginfos.new_registry()`. If present, it identifies the
+            dependency as being loaded from a Swift package registry.
 
     Returns:
         A `struct` representing an external dependency.
@@ -737,6 +815,7 @@ def _new_dependency(identity, name, source_control = None, file_system = None):
         name = pkginfo_dependencies.normalize_name(name),
         source_control = source_control,
         file_system = file_system,
+        registry = registry,
     )
 
 def _new_source_control(pin):
@@ -778,8 +857,11 @@ def _new_pin(identity, kind, location, state):
 def _new_pin_state(revision, version = None):
     """Create a `struct` representing the state for a pin.
 
+    `revision` is not provided for Swift package registry pins.
+    `version` is not provided for git ref pins.
+
     Args:
-        revision: The commit hash as a `string`.
+        revision: Optional. The commit hash as a `string`.
         version: Optional. The version string for the commit as a `string`.
 
     Returns:
@@ -801,6 +883,19 @@ def _new_file_system(path):
     """
     return struct(
         path = path,
+    )
+
+def _new_registry(pin):
+    """Create a `struct` representing a registry dependency.
+
+    Args:
+        pin: A `struct` as returned by `pkginfos.new_pin()`.
+
+    Returns:
+        A `struct` representing a registry dependency.
+    """
+    return struct(
+        pin = pin,
     )
 
 def _new_dependency_requirement(ranges = None):
@@ -1023,23 +1118,14 @@ def _new_swift_src_info_from_sources(
         repository_ctx,
         target_path,
         exclude_paths = exclude_paths,
+        exclude_directories = True,
     )
-
-    # Identify the directories
-    directories = repository_files.list_directories_under(
-        repository_ctx,
-        target_path,
-        exclude_paths = exclude_paths,
-    )
-    dirs_set = sets.make(directories)
 
     # The paths should be relative to the target not the root of the workspace.
-    # Do not include directories in the output.
     discovered_res_files = [
         f
         for f in all_target_files
-        if not sets.contains(dirs_set, f) and
-           resource_files.is_auto_discovered_resource(f)
+        if resource_files.is_auto_discovered_resource(f)
     ]
 
     return _new_swift_src_info(
@@ -1455,25 +1541,35 @@ def _new_swift_settings(build_settings):
     """
     defines = []
     unsafe_flags = []
+    language_modes = []
     experimental_features = []
+    upcoming_features = []
     for bs in build_settings:
         if bs.kind == build_setting_kinds.define:
             defines.append(bs)
         elif bs.kind == build_setting_kinds.unsafe_flags:
             unsafe_flags.append(bs)
+        elif bs.kind == build_setting_kinds.language_modes:
+            language_modes.append(bs)
         elif bs.kind == build_setting_kinds.experimental_features:
             experimental_features.append(bs)
+        elif bs.kind == build_setting_kinds.upcoming_features:
+            upcoming_features.append(bs)
         else:
             # We do not recognize the setting.
             pass
     if len(defines) == 0 and \
        len(unsafe_flags) == 0 and \
-       len(experimental_features) == 0:
+       len(language_modes) == 0 and \
+       len(experimental_features) == 0 and \
+       len(upcoming_features) == 0:
         return None
     return struct(
         defines = defines,
         unsafe_flags = unsafe_flags,
+        language_modes = language_modes,
         experimental_features = experimental_features,
+        upcoming_features = upcoming_features,
     )
 
 def _new_linker_settings(build_settings):
@@ -1658,7 +1754,9 @@ build_setting_kinds = struct(
     linked_framework = "linkedFramework",
     linked_library = "linkedLibrary",
     unsafe_flags = "unsafeFlags",
+    language_modes = "swiftLanguageMode",
     experimental_features = "enableExperimentalFeature",
+    upcoming_features = "enableUpcomingFeature",
 )
 
 # MARK: - API Definition
@@ -1686,6 +1784,7 @@ pkginfos = struct(
     new_product = _new_product,
     new_product_reference = _new_product_reference,
     new_product_type = _new_product_type,
+    new_registry = _new_registry,
     new_resource = _new_resource,
     new_resource_rule = _new_resource_rule,
     new_resource_rule_process = _new_resource_rule_process,

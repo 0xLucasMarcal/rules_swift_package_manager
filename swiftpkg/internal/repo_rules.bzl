@@ -139,6 +139,17 @@ def _artifact_infos_from_path(repository_ctx, path):
             by_name = "*.xcframework",
         )
 
+    # NOTE: SPM validates the `.xcframework` paths by decoding the `Info.plist` file.
+    # This would be more involved to do in Starlark, so instead we'll assume
+    # that a `.xcframework` dir is a potential candidate if it contains a
+    # `Info.plist` file without checking the file contents.
+    # See: https://github.com/swiftlang/swift-package-manager/blob/c26c12f54357fb7246c0bdbe3483105389f056b8/Sources/Workspace/Workspace%2BBinaryArtifacts.swift#L771-L780
+    xcframework_dirs = [
+        xf
+        for xf in xcframework_dirs
+        if repository_files.path_exists(repository_ctx, paths.join(xf, "Info.plist"))
+    ]
+
     # If multiple found, use the last one which is what SPM currently does:
     # https://github.com/swiftlang/swift-package-manager/blob/c26c12f54357fb7246c0bdbe3483105389f056b8/Sources/Workspace/Workspace%2BBinaryArtifacts.swift#L699-L723
     if len(xcframework_dirs) > 1:
@@ -198,11 +209,35 @@ def _get_auth(ctx, urls):
         auth_patterns = ctx.attr.auth_patterns
     return use_netrc(netrc, urls, auth_patterns)
 
+def _remove_bazel_files(repository_ctx, directory):
+    files = ["BUILD.bazel", "BUILD", "WORKSPACE", "WORKSPACE.bazel"]
+    for file in files:
+        repository_files.find_and_delete_files(repository_ctx, directory, file)
+
+def _remove_modulemaps(repository_ctx, directory, targets):
+    repository_files.find_and_delete_files(
+        repository_ctx,
+        directory,
+        "module.modulemap",
+        exclude_paths = [
+            # Framework modulemaps don't cause issues, and are needed
+            "**/*.framework/*",
+        ] + [
+            # We need to leave any modulemaps that we are passing into
+            # `objc_library`
+            target.clang_src_info.modulemap_path
+            for target in targets
+            if target.clang_src_info and target.clang_src_info.modulemap_path
+        ],
+    )
+
 repo_rules = struct(
     check_spm_version = _check_spm_version,
     env_attrs = _env_attrs,
     gen_build_files = _gen_build_files,
     get_exec_env = _get_exec_env,
+    remove_bazel_files = _remove_bazel_files,
+    remove_modulemaps = _remove_modulemaps,
     swift_attrs = _swift_attrs,
     write_workspace_file = _write_workspace_file,
 )
