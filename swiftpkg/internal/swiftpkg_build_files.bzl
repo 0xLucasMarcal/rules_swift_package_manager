@@ -2,6 +2,10 @@
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@cgrindel_bazel_starlib//bzllib:defs.bzl", "bazel_labels", "lists")
+load(
+    "//config_settings/bazel/compilation_mode:compilation_modes.bzl",
+    bazel_compilation_modes = "compilation_modes",
+)
 load(":artifact_infos.bzl", "artifact_types", "link_types")
 load(":bazel_apple_platforms.bzl", "bazel_apple_platforms")
 load(":build_decls.bzl", "build_decls")
@@ -303,6 +307,14 @@ def _clang_target_build_file(repository_ctx, pkg_ctx, target):
         "-fmodule-name={}".format(target.c99name),
     ]
 
+    # SPM defines DEBUG=1 for clang targets when building for debug
+    copts.append(
+        bzl_selects.new(
+            value = "-DDEBUG=1",
+            condition = bazel_compilation_modes.label(bazel_compilation_modes.debug),
+        ),
+    )
+
     # Do not add the srcs from the clang_src_info, yet. We will do that at the
     # end of this function where we will create separate targets based upon the
     # type of source file.
@@ -377,7 +389,15 @@ def _clang_target_build_file(repository_ctx, pkg_ctx, target):
         "visibility": _target_visibility(pkg_ctx.pkg_info.expose_build_targets),
     }
     if clang_src_info.hdrs:
-        attrs["hdrs"] = clang_src_info.hdrs
+        hdrs = clang_src_info.hdrs
+
+        if clang_src_info.modulemap_path:
+            # We add the custom module map to `hdrs` to insure it's part of the
+            # inputs of downstream targets. Without this sandboxed or RBE builds
+            # can fail.
+            hdrs = hdrs + [clang_src_info.modulemap_path]
+
+        attrs["hdrs"] = hdrs
     if clang_src_info.public_includes:
         attrs["includes"] = clang_src_info.public_includes
     if clang_src_info.textual_hdrs:
@@ -467,6 +487,51 @@ def _clang_target_build_file(repository_ctx, pkg_ctx, target):
     )
     attrs["aspect_hints"] = [aspect_hint_target_name]
 
+    rule_kind = clang_kinds.library
+
+    if clang_src_info.organized_srcs.c_srcs:
+        child_name = "{}_c".format(bzl_target_name)
+        child_dep_names.append(child_name)
+        decls.append(
+            _c_child_library(
+                repository_ctx,
+                name = child_name,
+                attrs = attrs,
+                rule_kind = rule_kind,
+                srcs = clang_src_info.organized_srcs.c_srcs +
+                       clang_src_info.organized_srcs.other_srcs,
+                language_standard = pkg_ctx.pkg_info.c_language_standard,
+            ),
+        )
+    if clang_src_info.organized_srcs.cxx_srcs:
+        child_name = "{}_cxx".format(bzl_target_name)
+        child_dep_names.append(child_name)
+        decls.append(
+            _c_child_library(
+                repository_ctx,
+                name = child_name,
+                attrs = attrs,
+                rule_kind = rule_kind,
+                srcs = clang_src_info.organized_srcs.cxx_srcs +
+                       clang_src_info.organized_srcs.other_srcs,
+                language_standard = pkg_ctx.pkg_info.cxx_language_standard,
+            ),
+        )
+
+    if clang_src_info.organized_srcs.assembly_srcs:
+        child_name = "{}_assembly".format(bzl_target_name)
+        child_dep_names.append(child_name)
+        decls.append(
+            _c_child_library(
+                repository_ctx,
+                name = child_name,
+                attrs = attrs,
+                rule_kind = rule_kind,
+                srcs = clang_src_info.organized_srcs.assembly_srcs +
+                       clang_src_info.organized_srcs.other_srcs,
+            ),
+        )
+
     if target.objc_src_info != None:
         rule_kind = objc_kinds.library
 
@@ -531,8 +596,7 @@ def _clang_target_build_file(repository_ctx, pkg_ctx, target):
                     name = child_name,
                     attrs = attrs,
                     rule_kind = rule_kind,
-                    srcs = clang_src_info.organized_srcs.c_srcs +
-                           clang_src_info.organized_srcs.objc_srcs +
+                    srcs = clang_src_info.organized_srcs.objc_srcs +
                            clang_src_info.organized_srcs.other_srcs +
                            res_objc_srcs,
                     language_standard = pkg_ctx.pkg_info.c_language_standard,
@@ -548,58 +612,11 @@ def _clang_target_build_file(repository_ctx, pkg_ctx, target):
                     name = child_name,
                     attrs = attrs,
                     rule_kind = rule_kind,
-                    srcs = clang_src_info.organized_srcs.assembly_srcs +
-                           clang_src_info.organized_srcs.cxx_srcs +
-                           clang_src_info.organized_srcs.objcxx_srcs +
+                    srcs = clang_src_info.organized_srcs.objcxx_srcs +
                            clang_src_info.organized_srcs.other_srcs +
                            res_objcxx_srcs,
                     language_standard = pkg_ctx.pkg_info.cxx_language_standard,
                     res_copts = res_copts,
-                ),
-            )
-    else:
-        rule_kind = clang_kinds.library
-
-        if clang_src_info.organized_srcs.c_srcs:
-            child_name = "{}_c".format(bzl_target_name)
-            child_dep_names.append(child_name)
-            decls.append(
-                _c_child_library(
-                    repository_ctx,
-                    name = child_name,
-                    attrs = attrs,
-                    rule_kind = rule_kind,
-                    srcs = clang_src_info.organized_srcs.c_srcs +
-                           clang_src_info.organized_srcs.other_srcs,
-                    language_standard = pkg_ctx.pkg_info.c_language_standard,
-                ),
-            )
-        if clang_src_info.organized_srcs.cxx_srcs:
-            child_name = "{}_cxx".format(bzl_target_name)
-            child_dep_names.append(child_name)
-            decls.append(
-                _c_child_library(
-                    repository_ctx,
-                    name = child_name,
-                    attrs = attrs,
-                    rule_kind = rule_kind,
-                    srcs = clang_src_info.organized_srcs.cxx_srcs +
-                           clang_src_info.organized_srcs.other_srcs,
-                    language_standard = pkg_ctx.pkg_info.cxx_language_standard,
-                ),
-            )
-
-        if clang_src_info.organized_srcs.assembly_srcs:
-            child_name = "{}_assembly".format(bzl_target_name)
-            child_dep_names.append(child_name)
-            decls.append(
-                _c_child_library(
-                    repository_ctx,
-                    name = child_name,
-                    attrs = attrs,
-                    rule_kind = rule_kind,
-                    srcs = clang_src_info.organized_srcs.assembly_srcs +
-                           clang_src_info.organized_srcs.other_srcs,
                 ),
             )
 
@@ -775,6 +792,9 @@ expected: {expected}\
 
 # MARK: - Apple Resource Group
 
+def _sanitized_bundle_file_name(bundle_path):
+    return bundle_path.replace(" ", "_").replace(".", "_").replace("(", "_").replace(")", "_")
+
 def _apple_resource_bundle(target, package_name, default_localization, expose_build_targets):
     bzl_target_name = pkginfo_targets.bazel_label_name(target)
     bundle_label_name = pkginfo_targets.resource_bundle_label_name(bzl_target_name)
@@ -783,10 +803,21 @@ def _apple_resource_bundle(target, package_name, default_localization, expose_bu
         bzl_target_name,
     )
 
-    resources = sorted([
+    sorted_resources = sorted([
         r.path
         for r in target.resources
     ])
+    resources = [
+        r
+        for r in sorted_resources
+        if not r.endswith(".bundle")
+    ]
+    precompiled_bundles_and_labels = [
+        (r, "{}_{}".format(bundle_label_name, _sanitized_bundle_file_name(r.split("/")[-1])))
+        for r in sorted_resources
+        if r.endswith(".bundle")
+    ]
+    precompiled_bundle_resource_labels = [bundle_pair[1] for bundle_pair in precompiled_bundles_and_labels]
 
     load_stmts = [
         apple_resource_bundle_load_stmt,
@@ -808,11 +839,28 @@ def _apple_resource_bundle(target, package_name, default_localization, expose_bu
                 "infoplists": [":{}".format(infoplist_name)],
                 # Based upon the code in SPM, it looks like they only support unstructured resources.
                 # https://github.com/apple/swift-package-manager/blob/main/Sources/PackageModel/Resource.swift#L25-L33
-                "resources": resources,
+                "resources": resources + [":{}".format(bundle_label) for bundle_label in precompiled_bundle_resource_labels],
                 "visibility": _target_visibility(expose_build_targets),
             },
         ),
     ]
+
+    if len(precompiled_bundles_and_labels) > 0:
+        load_stmts.append(apple_resource_bundle_import_load_stmt)
+        for precompiled_bundle, precompiled_bundle_label_name in precompiled_bundles_and_labels:
+            decls.append(
+                build_decls.new(
+                    kind = apple_kinds.apple_bundle_import,
+                    name = precompiled_bundle_label_name,
+                    attrs = {
+                        "bundle_imports": scg.new_fn_call(
+                            "glob",
+                            ["{precompiled_bundle}/**/*".format(precompiled_bundle = precompiled_bundle)],
+                        ),
+                    },
+                ),
+            )
+
     return struct(
         bundle_name = bundle_name,
         bundle_label_name = bundle_label_name,
@@ -1183,6 +1231,7 @@ apple_kinds = struct(
     static_xcframework_import = "apple_static_xcframework_import",
     dynamic_xcframework_import = "apple_dynamic_xcframework_import",
     resource_bundle = "apple_resource_bundle",
+    apple_bundle_import = "apple_bundle_import",
 )
 
 apple_apple_location = "@build_bazel_rules_apple//apple:apple.bzl"
@@ -1202,6 +1251,11 @@ apple_dynamic_xcframework_import_load_stmt = load_statements.new(
 apple_resource_bundle_load_stmt = load_statements.new(
     apple_resources_location,
     apple_kinds.resource_bundle,
+)
+
+apple_resource_bundle_import_load_stmt = load_statements.new(
+    apple_resources_location,
+    apple_kinds.apple_bundle_import,
 )
 
 swiftpkg_kinds = struct(
