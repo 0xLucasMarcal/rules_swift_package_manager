@@ -703,7 +703,7 @@ def _starlarkify_clang_attrs(repository_ctx, attrs):
 # MARK: - System Library Targets
 
 def _system_library_build_file(target):
-    attrs = {
+    cc_attrs = {
         "visibility": ["//:__subpackages__"],
     }
 
@@ -719,10 +719,9 @@ def _system_library_build_file(target):
         # builds clang libraries that will be used as Swift modules.
         "-DSWIFT_PACKAGE=1",
     ]
-    attrs["copts"] = copts
+    cc_attrs["copts"] = copts
 
     module_map_file = target.clang_src_info.modulemap_path
-    attrs["module_map"] = module_map_file
 
     # System library targets must include a modulemap file.
     # https://github.com/swiftlang/swift-package-manager/blob/12c14222fdde2ffd8303a2c805fed1b1eb802e5c/Sources/PackageLoading/PackageBuilder.swift#L853
@@ -730,16 +729,30 @@ def _system_library_build_file(target):
         fail("Expected a modulemap file for a system library target. name: ", target.name)
 
     header_files = target.clang_src_info.hdrs
-    attrs["hdrs"] = header_files
+    cc_attrs["hdrs"] = header_files
+
+    swift_hints_attrs = {
+        "visibility": ["//:__subpackages__"],
+        "module_name": target.c99name,
+        "module_map": module_map_file,
+    }
 
     bzl_target_name = pkginfo_targets.bazel_label_name(target)
+    bzl_swift_hints_target_name = bzl_target_name + "_hints"
+
+    cc_attrs["aspect_hints"] = [":" + bzl_swift_hints_target_name]
 
     decls = [ 
         build_decls.new(
+            kind = swift_kinds.interop_hint,
+            name = bzl_swift_hints_target_name,
+            attrs = swift_hints_attrs,
+        ),
+        build_decls.new(
             kind = objc_kinds.library,
             name = bzl_target_name,
-            attrs = attrs,
-        )
+            attrs = cc_attrs,
+        ),
     ]
 
     return build_files.new(
