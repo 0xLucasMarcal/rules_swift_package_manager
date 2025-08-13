@@ -16,11 +16,19 @@ load(":repo_rules.bzl", "repo_rules")
 # MARK: - Environment Variables
 
 def _clone_or_update_repo(repository_ctx, directory):
-    if ((not repository_ctx.attr.tag and not repository_ctx.attr.commit and not repository_ctx.attr.branch) or
-        (repository_ctx.attr.tag and repository_ctx.attr.commit) or
-        (repository_ctx.attr.tag and repository_ctx.attr.branch) or
-        (repository_ctx.attr.commit and repository_ctx.attr.branch)):
-        fail("Exactly one of commit, tag, or branch must be provided")
+    # Validate that exactly one of commit, tag, or branch is provided
+    provided = []
+    if repository_ctx.attr.commit:
+        provided.append("commit")
+    if repository_ctx.attr.tag:
+        provided.append("tag")
+    if repository_ctx.attr.branch:
+        provided.append("branch")
+
+    if len(provided) != 1:
+        fail("Exactly one of commit, tag, or branch must be provided. Found: [{}]".format(
+            ", ".join(provided) if provided else "none",
+        ))
 
     git_ = git_repo(repository_ctx, directory)
 
@@ -83,8 +91,23 @@ def _swift_package_impl(repository_ctx):
     # Remove unused modulemaps to prevent module redefinition errors
     repo_rules.remove_modulemaps(repository_ctx, directory, pkg_ctx.pkg_info.targets)
 
+    has_repo_metadata = hasattr(repository_ctx, "repo_metadata")
+    if has_repo_metadata and repository_ctx.attr.commit:
+        return repository_ctx.repo_metadata(reproducible = True)
+
     # Return attributes that make this reproducible
-    return _update_git_attrs(repository_ctx.attr, _ALL_ATTRS.keys(), update)
+    attrs_for_reproducibility = _update_git_attrs(
+        repository_ctx.attr,
+        _ALL_ATTRS.keys(),
+        update,
+    )
+
+    if has_repo_metadata:
+        return repository_ctx.repo_metadata(
+            attrs_for_reproducibility = attrs_for_reproducibility,
+        )
+    else:
+        return attrs_for_reproducibility
 
 _GIT_ATTRS = {
     "branch": attr.string(
